@@ -10,6 +10,11 @@ node_modules/
 /build
 /dist
 
+# Database
+*.db
+*.db-journal
+prisma/dev.db*
+
 # Misc
 .DS_Store
 .env

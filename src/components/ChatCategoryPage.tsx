@@ -2,6 +2,10 @@ import { useState, useEffect, useRef } from 'react';
 import { Send, Mic, Image as ImageIcon } from 'lucide-react';
 import { LawyerRecommendation } from './LawyerRecommendation';
 import { CHAT_TOPICS, ChatTopic } from '../lib/chatTopics';
+import { FileUpload } from './FileUpload';
+import { FieldConfirmation, ExtractedFields } from './FieldConfirmation';
+import { IdentityForm } from './IdentityForm';
+import { EscalationModal } from './EscalationModal';
 
 interface Message {
   id: string;
@@ -25,7 +29,7 @@ interface ChatCategoryPageProps {
 const welcomeMessages: { [key: string]: string[] } = {
   traffic: [
     'ברוכים הבאים ל-Wallmans AI – תעבורה',
-    'כדי שאוכל להבין את המקרה שלכם, אצטרך לשאול אתכם 4 שאלות קצרות. בואו נתחיל:'
+    'כדי שאוכל להבין את המקרה שלכם, אצטרך לשאול אתכם מספר שאלות קצרות. בואו נתחיל'
   ],
   torts: [
     'ברוכים הבאים ל-Wallmans AI – נזיקין',
@@ -55,6 +59,29 @@ export function ChatCategoryPage({ categoryId, categoryTitle, categoryColor, onN
   const [showLawyerRecommendation, setShowLawyerRecommendation] = useState(false);
   const [isWaitingForAI, setIsWaitingForAI] = useState(false);
   const [intakeComplete, setIntakeComplete] = useState(false);
+  
+  // New state for lead capture flow (traffic category)
+  const [caseId, setCaseId] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('currentCaseId');
+    }
+    return null;
+  });
+  const [flowType, setFlowType] = useState<'upload' | 'manual' | null>(null);
+  const [extractedFields, setExtractedFields] = useState<ExtractedFields | null>(null);
+  const [showFieldConfirmation, setShowFieldConfirmation] = useState(false);
+  const [showIdentityForm, setShowIdentityForm] = useState(false);
+  const [showEscalationModal, setShowEscalationModal] = useState(false);
+  const [identityCollected, setIdentityCollected] = useState(false);
+  const [manualQuestions, setManualQuestions] = useState([
+    { id: 'm1', label: 'סוג הדוח', answer: '' },
+    { id: 'm2', label: 'מתי ואיפה זה קרה? (תאריך, שעה, מיקום)', answer: '' },
+    { id: 'm3', label: 'מה נרשם בדוח? (סכום ונקודות אם ידוע)', answer: '' },
+    { id: 'm4', label: 'איך נמסר הדוח?', answer: '' },
+    { id: 'm5', label: 'מה קרה בפועל לפי הגרסה שלכם?', answer: '' },
+  ]);
+  const [currentManualQuestion, setCurrentManualQuestion] = useState(0);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -97,8 +124,37 @@ export function ChatCategoryPage({ categoryId, categoryTitle, categoryColor, onN
         await new Promise(resolve => setTimeout(resolve, 300));
       }
 
-      // After welcome, ask first question
-      if (intakeQuestions.length > 0) {
+      // For traffic category, show choice between upload and manual
+      if (categoryId === 'traffic') {
+        setIsTyping(true);
+        await new Promise(resolve => setTimeout(resolve, 500));
+        setIsTyping(false);
+        
+        setMessages(prev => [...prev, {
+          id: `choice-question`,
+          text: 'איך תרצו להמשיך?',
+          sender: 'bot',
+          timestamp: new Date()
+        }]);
+        
+        // Create case
+        try {
+          const response = await fetch('/api/cases', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+          });
+          const data = await response.json();
+          if (data.ok && data.caseId) {
+            setCaseId(data.caseId);
+            if (typeof window !== 'undefined') {
+              localStorage.setItem('currentCaseId', data.caseId);
+            }
+          }
+        } catch (error) {
+          console.error('Failed to create case:', error);
+        }
+      } else if (intakeQuestions.length > 0) {
+        // For other categories, ask first question as before
         setIsTyping(true);
         await new Promise(resolve => setTimeout(resolve, 500));
         setIsTyping(false);
@@ -243,6 +299,165 @@ export function ChatCategoryPage({ categoryId, categoryTitle, categoryColor, onN
     }
   };
 
+  // Handler for traffic category flow choice
+  const handleFlowChoice = async (choice: 'upload' | 'manual') => {
+    setFlowType(choice);
+    
+    if (choice === 'upload') {
+      setMessages(prev => [...prev, {
+        id: `user-choice-${Date.now()}`,
+        text: 'להעלות את הדוח',
+        sender: 'user',
+        timestamp: new Date()
+      }]);
+      
+      setIsTyping(true);
+      setTimeout(() => {
+        setIsTyping(false);
+        setMessages(prev => [...prev, {
+          id: `upload-instruction`,
+          text: 'אנא העלה את קובץ הדוח (PDF או תמונה)',
+          sender: 'bot',
+          timestamp: new Date()
+        }]);
+      }, 500);
+    } else {
+      setMessages(prev => [...prev, {
+        id: `user-choice-${Date.now()}`,
+        text: 'למלא ידנית',
+        sender: 'user',
+        timestamp: new Date()
+      }]);
+      
+      setIsTyping(true);
+      setTimeout(() => {
+        setIsTyping(false);
+        setMessages(prev => [...prev, {
+          id: `manual-question-0`,
+          text: manualQuestions[0].label,
+          sender: 'bot',
+          timestamp: new Date()
+        }]);
+      }, 500);
+    }
+  };
+
+  // Handler for file upload
+  const handleFileUpload = async (file: File) => {
+    if (!caseId) return;
+    
+    setIsTyping(true);
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+      const response = await fetch(`/api/cases/${caseId}/upload`, {
+        method: 'POST',
+        body: formData,
+      });
+      
+      const data = await response.json();
+      
+      if (data.ok && data.extractedFields) {
+        setExtractedFields(data.extractedFields);
+        setShowFieldConfirmation(true);
+        setMessages(prev => [...prev, {
+          id: `file-uploaded-${Date.now()}`,
+          text: `קובץ הועלה בהצלחה: ${file.name}`,
+          sender: 'user',
+          timestamp: new Date()
+        }]);
+      } else {
+        throw new Error(data.errorMessage || 'Upload failed');
+      }
+    } catch (error) {
+      console.error('Upload error:', error);
+      alert('שגיאה בהעלאת הקובץ. נסה שוב.');
+    } finally {
+      setIsTyping(false);
+    }
+  };
+
+  // Handler for field confirmation
+  const handleFieldConfirm = async (fields: ExtractedFields) => {
+    if (!caseId) return;
+    
+    try {
+      const response = await fetch(`/api/cases/${caseId}/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields }),
+      });
+      
+      const data = await response.json();
+      
+      if (data.ok) {
+        setShowFieldConfirmation(false);
+        setShowIdentityForm(true);
+        setMessages(prev => [...prev, {
+          id: `fields-confirmed-${Date.now()}`,
+          text: 'פרטים אושרו',
+          sender: 'user',
+          timestamp: new Date()
+        }]);
+      }
+    } catch (error) {
+      console.error('Confirm error:', error);
+      alert('שגיאה באישור הפרטים. נסה שוב.');
+    }
+  };
+
+  // Handler for identity submission
+  const handleIdentitySubmit = async (data: { fullName: string; email: string }) => {
+    if (!caseId) return;
+    
+    try {
+      const response = await fetch(`/api/cases/${caseId}/identify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      
+      const result = await response.json();
+      
+      if (result.ok) {
+        setShowIdentityForm(false);
+        setIdentityCollected(true);
+        setIntakeComplete(true);
+        
+        // Now call AI with the case data
+        const caseData = extractedFields || {};
+        await callAI(caseData as Record<string, string>, messages);
+      }
+    } catch (error) {
+      console.error('Identity error:', error);
+      alert('שגיאה בשמירת הפרטים. נסה שוב.');
+    }
+  };
+
+  // Handler for escalation
+  const handleEscalation = async (data: { phone: string; consent: boolean }) => {
+    if (!caseId) return;
+    
+    try {
+      const response = await fetch(`/api/cases/${caseId}/escalate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      
+      const result = await response.json();
+      
+      if (result.ok) {
+        setShowEscalationModal(false);
+        alert('הפרטים נשלחו בהצלחה!');
+      }
+    } catch (error) {
+      console.error('Escalation error:', error);
+      alert('שגיאה בשליחת הפרטים. נסה שוב.');
+    }
+  };
+
   const handleSend = async () => {
     if (!inputValue.trim() || !welcomeComplete || isWaitingForAI) return;
 
@@ -260,9 +475,46 @@ export function ChatCategoryPage({ categoryId, categoryTitle, categoryColor, onN
     setMessages(prev => [...prev, userMessage]);
     const updatedMessages = [...messages, userMessage];
 
-    // Check if we're still in intake phase
+    // Handle traffic category flow
+    if (categoryId === 'traffic' && !flowType) {
+      if (trimmedInput.includes('העלה') || trimmedInput.includes('קובץ') || trimmedInput.includes('דוח')) {
+        await handleFlowChoice('upload');
+        return;
+      } else if (trimmedInput.includes('ידנית') || trimmedInput.includes('מלא')) {
+        await handleFlowChoice('manual');
+        return;
+      }
+    }
+
+    // Handle manual questions for traffic
+    if (categoryId === 'traffic' && flowType === 'manual' && !identityCollected) {
+      const updatedQuestions = [...manualQuestions];
+      updatedQuestions[currentManualQuestion].answer = trimmedInput;
+      setManualQuestions(updatedQuestions);
+      
+      if (currentManualQuestion < manualQuestions.length - 1) {
+        const nextIndex = currentManualQuestion + 1;
+        setCurrentManualQuestion(nextIndex);
+        setIsTyping(true);
+        setTimeout(() => {
+          setIsTyping(false);
+          setMessages(prev => [...prev, {
+            id: `manual-question-${nextIndex}`,
+            text: manualQuestions[nextIndex].label,
+            sender: 'bot',
+            timestamp: new Date()
+          }]);
+        }, 800);
+      } else {
+        // All manual questions answered, show identity form
+        setShowIdentityForm(true);
+      }
+      return;
+    }
+
+    // Check if we're still in intake phase (for non-traffic categories)
     const currentQuestion = intakeQuestions[currentQuestionIndex];
-    if (currentQuestion && !intakeComplete) {
+    if (currentQuestion && !intakeComplete && categoryId !== 'traffic') {
       // Still in intake - save answer and move to next question or call AI
       const newAnswers = { ...intakeAnswers, [currentQuestion.id]: trimmedInput };
       setIntakeAnswers(newAnswers);
@@ -393,7 +645,13 @@ export function ChatCategoryPage({ categoryId, categoryTitle, categoryColor, onN
                     {/* CTA Button */}
                     {message.showCTA && (
                       <button
-                        onClick={() => setShowLawyerRecommendation(true)}
+                        onClick={() => {
+                          if (categoryId === 'traffic') {
+                            setShowEscalationModal(true);
+                          } else {
+                            setShowLawyerRecommendation(true);
+                          }
+                        }}
                         className="mt-4 w-full py-3 px-5 rounded-xl text-white transition-all hover:opacity-90 shadow-lg text-sm"
                         style={{ backgroundColor: categoryColor }}
                       >
@@ -447,16 +705,78 @@ export function ChatCategoryPage({ categoryId, categoryTitle, categoryColor, onN
         </div>
       </div>
 
+      {/* Choice buttons for traffic category */}
+      {categoryId === 'traffic' && !flowType && welcomeComplete && (
+        <div className="px-4 py-4 border-t bg-white">
+          <div className="max-w-4xl mx-auto space-y-3">
+            <button
+              onClick={() => handleFlowChoice('upload')}
+              className="w-full py-3 px-4 rounded-lg text-white font-medium transition-all hover:opacity-90"
+              style={{ backgroundColor: categoryColor }}
+            >
+              להעלות את הדוח
+            </button>
+            <button
+              onClick={() => handleFlowChoice('manual')}
+              className="w-full py-3 px-4 rounded-lg border-2 font-medium transition-all hover:bg-gray-50"
+              style={{ borderColor: categoryColor, color: categoryColor }}
+            >
+              למלא ידנית
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* File upload component */}
+      {categoryId === 'traffic' && flowType === 'upload' && !showFieldConfirmation && !identityCollected && (
+        <div className="px-4 py-4 border-t bg-white">
+          <div className="max-w-4xl mx-auto">
+            <FileUpload
+              onUpload={handleFileUpload}
+              categoryColor={categoryColor}
+              disabled={isWaitingForAI}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Field confirmation component */}
+      {showFieldConfirmation && extractedFields && (
+        <div className="px-4 py-4 border-t bg-white">
+          <div className="max-w-4xl mx-auto">
+            <FieldConfirmation
+              fields={extractedFields}
+              onConfirm={handleFieldConfirm}
+              onEdit={(fields) => setExtractedFields(fields)}
+              categoryColor={categoryColor}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Identity form */}
+      {showIdentityForm && (
+        <div className="px-4 py-4 border-t bg-white">
+          <div className="max-w-4xl mx-auto">
+            <IdentityForm
+              onSubmit={handleIdentitySubmit}
+              categoryColor={categoryColor}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Input Area */}
-      <div className="border-t bg-white px-4 py-4 pb-20 md:pb-4 shadow-lg">
-        <div className="max-w-4xl mx-auto">
-          {!welcomeComplete && (
-            <div className="text-center text-sm text-gray-500 mb-3">
-              רק שנייה...
-            </div>
-          )}
-          
-          <div className="flex items-end gap-2">
+      {!showFieldConfirmation && !showIdentityForm && (categoryId !== 'traffic' || flowType !== 'upload' || identityCollected) && (
+        <div className="border-t bg-white px-4 py-4 pb-20 md:pb-4 shadow-lg">
+          <div className="max-w-4xl mx-auto">
+            {!welcomeComplete && (
+              <div className="text-center text-sm text-gray-500 mb-3">
+                רק שנייה...
+              </div>
+            )}
+            
+            <div className="flex items-end gap-2">
             {/* Voice Recording Button */}
             <button
               disabled={!welcomeComplete || isWaitingForAI}
@@ -521,6 +841,7 @@ export function ChatCategoryPage({ categoryId, categoryTitle, categoryColor, onN
           </div>
         </div>
       </div>
+      )}
 
       {/* Lawyer Recommendation Modal */}
       {showLawyerRecommendation && (
@@ -528,6 +849,16 @@ export function ChatCategoryPage({ categoryId, categoryTitle, categoryColor, onN
           onClose={() => setShowLawyerRecommendation(false)}
           caseType={categoryTitle}
           onNavigateHome={onNavigateHome}
+        />
+      )}
+
+      {/* Escalation Modal */}
+      {categoryId === 'traffic' && (
+        <EscalationModal
+          open={showEscalationModal}
+          onClose={() => setShowEscalationModal(false)}
+          onSubmit={handleEscalation}
+          categoryColor={categoryColor}
         />
       )}
     </div>
